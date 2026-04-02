@@ -99,8 +99,8 @@ jobs:
           push: true
           provenance: false # Lambda requires Docker V2 manifest, not OCI Image Index
           tags: ${{ steps.ecr.outputs.ecr_url }}:latest
-          cache-from: type=registry,ref=${{ steps.ecr.outputs.ecr_url }}:cache
-          cache-to: type=registry,ref=${{ steps.ecr.outputs.ecr_url }}:cache,mode=max,oci-mediatypes=false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Phase B: apply the rest now that the image exists in ECR
       - name: Terraform apply — full infrastructure
