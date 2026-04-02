@@ -39,7 +39,25 @@ jobs:
       # ── 3. Terraform ─────────────────────────────────────────────────────────
       # GitHub secret required:
       #   TF_STATE_BUCKET — S3 bucket name that stores terraform.tfstate
-      #                     (see bootstrap instructions in infrastructure/main.tf)
+      - name: Create Terraform state bucket if it does not exist
+        run: |
+          if ! aws s3api head-bucket --bucket "${{ secrets.TF_STATE_BUCKET }}" \
+               --region "$AWS_REGION" 2>/dev/null; then
+            echo "Creating state bucket: ${{ secrets.TF_STATE_BUCKET }}"
+            aws s3 mb "s3://${{ secrets.TF_STATE_BUCKET }}" --region "$AWS_REGION"
+            # Enable versioning so state history is preserved
+            aws s3api put-bucket-versioning \
+              --bucket "${{ secrets.TF_STATE_BUCKET }}" \
+              --versioning-configuration Status=Enabled
+            # Block all public access
+            aws s3api put-public-access-block \
+              --bucket "${{ secrets.TF_STATE_BUCKET }}" \
+              --public-access-block-configuration \
+                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+          else
+            echo "State bucket already exists."
+          fi
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:

@@ -11,11 +11,8 @@ terraform {
   #
   # One-time bootstrap (run locally, before first CI run):
   #   aws s3 mb s3://YOUR-TFSTATE-BUCKET --region us-east-1
-  #   aws dynamodb create-table \
-  #     --table-name image-vote-tf-locks \
-  #     --attribute-definitions AttributeName=LockID,AttributeType=S \
-  #     --key-schema AttributeName=LockID,KeyType=HASH \
-  #     --billing-mode PAY_PER_REQUEST --region us-east-1
+  #   (The bucket is created automatically by the CI workflow on first run too —
+  #    see the "Create Terraform state bucket" step in deploy.yml)
   #
   # Then set the GitHub secret TF_STATE_BUCKET to YOUR-TFSTATE-BUCKET.
   # The workflow calls: terraform init -backend-config="bucket=$TF_STATE_BUCKET"
@@ -23,9 +20,9 @@ terraform {
   backend "s3" {
     # Bucket and region are supplied at init time via -backend-config flags
     # so no sensitive values are hardcoded here.
-    key            = "image-vote/terraform.tfstate"
-    dynamodb_table = "image-vote-tf-locks"
-    encrypt        = true
+    key          = "image-vote/terraform.tfstate"
+    use_lockfile = true # native S3 locking (replaces deprecated dynamodb_table)
+    encrypt      = true
   }
 }
 

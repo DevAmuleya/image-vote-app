@@ -117,8 +117,8 @@ jobs:
             --no-cli-pager \
             --output text > /dev/null || true
 
-      # ── 9. Delete Terraform state bucket & lock table ─────────────────────────
-      # These were created manually (bootstrap) so Terraform doesn't manage them.
+      # ── 9. Delete Terraform state bucket ─────────────────────────────────────
+      # Created automatically by deploy.yml; not managed by Terraform itself.
       - name: Empty and delete Terraform state bucket
         run: |
           aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}" \
@@ -126,14 +126,6 @@ jobs:
           aws s3 rb "s3://${{ secrets.TF_STATE_BUCKET }}" \
             --region "$AWS_REGION" || true
 
-      - name: Delete DynamoDB lock table
-        run: |
-          aws dynamodb delete-table \
-            --table-name image-vote-tf-locks \
-            --region "$AWS_REGION" \
-            --no-cli-pager \
-            --output text > /dev/null || true
-
-      # ── 10. Done ──────────────────────────────────────────────────────────────
+      # ── 10. Done ─────────────────────────────────────────────────────────────
       - name: Summary
         run: echo "All infrastructure destroyed successfully."
