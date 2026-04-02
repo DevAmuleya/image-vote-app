@@ -1,0 +1,139 @@
+name: Destroy Infrastructure
+
+# Manual trigger ONLY — never runs automatically.
+# Go to: GitHub → Actions → Destroy Infrastructure → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm you want to tear down ALL infrastructure'
+        required: true
+        default: ""
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  destroy:
+    name: Destroy all AWS infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Guard: abort unless the user typed "destroy" ─────────────────────────
+      - name: Confirm intent
+        if: ${{ github.event.inputs.confirm != 'destroy' }}
+        run: |
+          echo "ERROR: You must type exactly 'destroy' in the confirmation field."
+          exit 1
+
+      # ── 1. Checkout ───────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. AWS credentials ────────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 3. Terraform init ─────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infrastructure
+        run: |
+          terraform init -upgrade -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      # ── 4. Read bucket names BEFORE destroy ───────────────────────────────────
+      # Terraform refuses to delete non-empty S3 buckets; we empty them first.
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infrastructure
+        run: |
+          echo "frontend_bucket=$(terraform output -raw frontend_bucket 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
+          echo "photos_bucket=$(terraform output -raw photos_bucket 2>/dev/null || echo '')"     >> "$GITHUB_OUTPUT"
+          echo "ecr_url=$(terraform output -raw ecr_repository_url 2>/dev/null || echo '')"     >> "$GITHUB_OUTPUT"
+
+      # ── 5. Empty S3 buckets ───────────────────────────────────────────────────
+      - name: Empty frontend S3 bucket
+        if: ${{ steps.tf.outputs.frontend_bucket != '' }}
+        run: |
+          aws s3 rm "s3://${{ steps.tf.outputs.frontend_bucket }}" \
+            --recursive --region "$AWS_REGION" || true
+
+      - name: Empty photos S3 bucket
+        if: ${{ steps.tf.outputs.photos_bucket != '' }}
+        run: |
+          aws s3 rm "s3://${{ steps.tf.outputs.photos_bucket }}" \
+            --recursive --region "$AWS_REGION" || true
+
+      # ── 6. Delete all ECR images ──────────────────────────────────────────────
+      # ECR repos with images cannot be deleted by Terraform unless force_delete=true.
+      - name: Delete ECR images
+        if: ${{ steps.tf.outputs.ecr_url != '' }}
+        run: |
+          REPO=$(echo "${{ steps.tf.outputs.ecr_url }}" | cut -d/ -f2-)
+          IMAGE_IDS=$(aws ecr list-images \
+            --repository-name "$REPO" \
+            --region "$AWS_REGION" \
+            --query 'imageIds[*]' \
+            --output json 2>/dev/null || echo '[]')
+          if [ "$IMAGE_IDS" != "[]" ] && [ -n "$IMAGE_IDS" ]; then
+            aws ecr batch-delete-image \
+              --repository-name "$REPO" \
+              --region "$AWS_REGION" \
+              --image-ids "$IMAGE_IDS" \
+              --no-cli-pager \
+              --output text > /dev/null
+          fi
+
+      # ── 7. Terraform destroy ──────────────────────────────────────────────────
+      - name: Terraform destroy
+        working-directory: infrastructure
+        run: terraform destroy -auto-approve -input=false
+
+      # ── 8. Delete SSM parameters ──────────────────────────────────────────────
+      - name: Delete SSM parameters
+        run: |
+          aws ssm delete-parameters \
+            --region "$AWS_REGION" \
+            --names \
+              /myapp/database_url \
+              /myapp/aws_access_key \
+              /myapp/aws_secret_key \
+              /myapp/aws_bucket \
+              /myapp/aws_region \
+              /myapp/fb_app_id \
+              /myapp/fb_app_secret \
+              /myapp/jwt_secret \
+              /myapp/frontend_url \
+            --no-cli-pager \
+            --output text > /dev/null || true
+
+      # ── 9. Delete Terraform state bucket & lock table ─────────────────────────
+      # These were created manually (bootstrap) so Terraform doesn't manage them.
+      - name: Empty and delete Terraform state bucket
+        run: |
+          aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}" \
+            --recursive --region "$AWS_REGION" || true
+          aws s3 rb "s3://${{ secrets.TF_STATE_BUCKET }}" \
+            --region "$AWS_REGION" || true
+
+      - name: Delete DynamoDB lock table
+        run: |
+          aws dynamodb delete-table \
+            --table-name image-vote-tf-locks \
+            --region "$AWS_REGION" \
+            --no-cli-pager \
+            --output text > /dev/null || true
+
+      # ── 10. Done ──────────────────────────────────────────────────────────────
+      - name: Summary
+        run: echo "All infrastructure destroyed successfully."

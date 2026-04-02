@@ -1,0 +1,22 @@
+# Virtual environment — packages are installed inside the image via pip
+venv/
+.venv/
+
+# Secrets — must never be baked into the Docker image
+.env
+
+# Alembic migrations are run separately, not inside Lambda
+migrations/
+alembic.ini
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.log

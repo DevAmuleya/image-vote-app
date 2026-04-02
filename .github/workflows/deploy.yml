@@ -1,0 +1,185 @@
+name: Deploy
+
+# Trigger on every push to main/master.
+# Push to any other branch does nothing — safe for feature branches.
+on:
+  push:
+    branches: [main, master]
+
+# Prevent two deploys from running in parallel (second run waits, not cancels).
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  FUNCTION_NAME: image-vote-api # must match var.app_name + "-api" in Terraform
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. AWS credentials ───────────────────────────────────────────────────
+      # GitHub secrets required:
+      #   AWS_ACCESS_KEY_ID      — IAM key with ECR, Lambda, S3, SSM, CF, TF rights
+      #   AWS_SECRET_ACCESS_KEY  — matching secret
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 3. Terraform ─────────────────────────────────────────────────────────
+      # GitHub secret required:
+      #   TF_STATE_BUCKET — S3 bucket name that stores terraform.tfstate
+      #                     (see bootstrap instructions in infrastructure/main.tf)
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false # keep raw output for output parsing
+
+      - name: Terraform init
+        working-directory: infrastructure
+        run: |
+          terraform init -upgrade -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform validate
+        working-directory: infrastructure
+        run: terraform validate
+
+      - name: Terraform apply
+        working-directory: infrastructure
+        run: terraform apply -auto-approve -input=false
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infrastructure
+        run: |
+          echo "ecr_url=$(terraform output -raw ecr_repository_url)"             >> "$GITHUB_OUTPUT"
+          echo "cf_url=$(terraform output -raw cloudfront_url)"                  >> "$GITHUB_OUTPUT"
+          echo "cf_id=$(terraform output -raw cloudfront_distribution_id)"       >> "$GITHUB_OUTPUT"
+          echo "frontend_bucket=$(terraform output -raw frontend_bucket)"        >> "$GITHUB_OUTPUT"
+          echo "photos_bucket=$(terraform output -raw photos_bucket)"            >> "$GITHUB_OUTPUT"
+
+      # ── 4. Build & push Docker image to ECR ──────────────────────────────────
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          platforms: linux/amd64 # Lambda runs on x86_64
+          push: true
+          tags: ${{ steps.tf.outputs.ecr_url }}:latest
+          # Layer cache stored in ECR to speed up subsequent builds
+          cache-from: type=registry,ref=${{ steps.tf.outputs.ecr_url }}:cache
+          cache-to: type=registry,ref=${{ steps.tf.outputs.ecr_url }}:cache,mode=max
+
+      # ── 5. Update Lambda function ────────────────────────────────────────────
+      - name: Update Lambda to new image
+        run: |
+          aws lambda update-function-code \
+            --region "$AWS_REGION" \
+            --function-name "$FUNCTION_NAME" \
+            --image-uri "${{ steps.tf.outputs.ecr_url }}:latest" \
+            --no-cli-pager \
+            --output text > /dev/null
+
+      - name: Wait for Lambda update to finish
+        run: |
+          aws lambda wait function-updated \
+            --region "$AWS_REGION" \
+            --function-name "$FUNCTION_NAME"
+
+      # ── 6. Update SSM parameters ─────────────────────────────────────────────
+      # frontend_url and aws_bucket are only known after Terraform runs,
+      # so they can't be set by setup-ssm.sh and must be refreshed here.
+      - name: Push frontend_url to SSM
+        run: |
+          aws ssm put-parameter \
+            --region "$AWS_REGION" \
+            --name "/myapp/frontend_url" \
+            --value "${{ steps.tf.outputs.cf_url }}" \
+            --type SecureString \
+            --overwrite \
+            --no-cli-pager \
+            --output text > /dev/null
+
+      - name: Push aws_bucket to SSM
+        run: |
+          aws ssm put-parameter \
+            --region "$AWS_REGION" \
+            --name "/myapp/aws_bucket" \
+            --value "${{ steps.tf.outputs.photos_bucket }}" \
+            --type SecureString \
+            --overwrite \
+            --no-cli-pager \
+            --output text > /dev/null
+
+      # ── 7. Build & deploy React frontend ─────────────────────────────────────
+      # GitHub secret required:
+      #   VITE_FB_APP_ID — Facebook App ID (visible in client JS, treat as var not cred)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Write frontend production env
+        working-directory: frontend
+        run: |
+          printf 'VITE_FB_APP_ID=%s\nVITE_API_URL=%s\n' \
+            "${{ secrets.VITE_FB_APP_ID }}" \
+            "${{ steps.tf.outputs.cf_url }}" \
+            > .env.production
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Sync JS/CSS assets to S3 (long-lived cache)
+        run: |
+          aws s3 sync frontend/dist/ "s3://${{ steps.tf.outputs.frontend_bucket }}" \
+            --region "$AWS_REGION" \
+            --delete \
+            --cache-control "max-age=31536000,immutable" \
+            --exclude "index.html"
+
+      - name: Upload index.html to S3 (no-cache)
+        run: |
+          aws s3 cp frontend/dist/index.html \
+            "s3://${{ steps.tf.outputs.frontend_bucket }}/index.html" \
+            --region "$AWS_REGION" \
+            --cache-control "no-cache,no-store,must-revalidate"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.tf.outputs.cf_id }}" \
+            --paths "/*" \
+            --no-cli-pager \
+            --output text > /dev/null
+
+      # ── 8. Summary ───────────────────────────────────────────────────────────
+      - name: Print deployment URL
+        run: |
+          echo "Deploy complete."
+          echo "App URL: ${{ steps.tf.outputs.cf_url }}"

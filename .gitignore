@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# Secrets — NEVER commit these
+backend/.env
+frontend/.env.production
+
+# Terraform state (contains sensitive outputs)
+infrastructure/.terraform/
+infrastructure/terraform.tfstate
+infrastructure/terraform.tfstate.backup
+infrastructure/.terraform.lock.hcl
+
+# Frontend build
+frontend/dist/
+
+# Misc
+.DS_Store
+*.log
