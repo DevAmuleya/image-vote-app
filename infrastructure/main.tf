@@ -97,8 +97,7 @@ resource "aws_lambda_function" "app" {
 
   environment {
     variables = {
-      AWS_LAMBDA_FUNCTION_NAME = "${var.app_name}-api"
-      CORS_ORIGINS             = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+      CORS_ORIGINS = "https://${aws_cloudfront_distribution.frontend.domain_name}"
     }
   }
 
