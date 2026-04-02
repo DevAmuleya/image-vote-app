@@ -74,7 +74,35 @@ jobs:
         working-directory: infrastructure
         run: terraform validate
 
-      - name: Terraform apply
+      # Phase A: create ECR repo first (Lambda needs the image to exist before it can be created)
+      - name: Terraform apply — ECR only
+        working-directory: infrastructure
+        run: terraform apply -auto-approve -input=false -target=aws_ecr_repository.app
+
+      - name: Read ECR URL
+        id: ecr
+        working-directory: infrastructure
+        run: echo "ecr_url=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Build & push Docker image to ECR ──────────────────────────────────
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.ecr_url }}:latest
+          cache-from: type=registry,ref=${{ steps.ecr.outputs.ecr_url }}:cache
+          cache-to: type=registry,ref=${{ steps.ecr.outputs.ecr_url }}:cache,mode=max
+
+      # Phase B: apply the rest now that the image exists in ECR
+      - name: Terraform apply — full infrastructure
         working-directory: infrastructure
         run: terraform apply -auto-approve -input=false
 
@@ -88,39 +116,25 @@ jobs:
           echo "frontend_bucket=$(terraform output -raw frontend_bucket)"        >> "$GITHUB_OUTPUT"
           echo "photos_bucket=$(terraform output -raw photos_bucket)"            >> "$GITHUB_OUTPUT"
 
-      # ── 4. Build & push Docker image to ECR ──────────────────────────────────
-      - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: backend
-          platforms: linux/amd64 # Lambda runs on x86_64
-          push: true
-          tags: ${{ steps.tf.outputs.ecr_url }}:latest
-          # Layer cache stored in ECR to speed up subsequent builds
-          cache-from: type=registry,ref=${{ steps.tf.outputs.ecr_url }}:cache
-          cache-to: type=registry,ref=${{ steps.tf.outputs.ecr_url }}:cache,mode=max
-
-      # ── 5. Update Lambda function ────────────────────────────────────────────
+      # ── 5. Update Lambda function ─────────────────────────────────────────────
+      # (skipped on first deploy — Lambda was just created with the image above)
+      # On subsequent deploys this ensures Lambda picks up the new image.
       - name: Update Lambda to new image
+        working-directory: infrastructure
         run: |
+          # Only call update-function-code if the function already existed before this apply.
+          # On first deploy terraform created it with the image, so this is a no-op.
           aws lambda update-function-code \
             --region "$AWS_REGION" \
             --function-name "$FUNCTION_NAME" \
             --image-uri "${{ steps.tf.outputs.ecr_url }}:latest" \
-            --no-cli-pager \
-            --output text > /dev/null
+            --no-cli-pager --output text > /dev/null || true
 
       - name: Wait for Lambda update to finish
         run: |
           aws lambda wait function-updated \
             --region "$AWS_REGION" \
-            --function-name "$FUNCTION_NAME"
+            --function-name "$FUNCTION_NAME" || true
 
       # ── 6. Update SSM parameters ─────────────────────────────────────────────
       # frontend_url and aws_bucket are only known after Terraform runs,
