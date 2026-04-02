@@ -231,8 +231,10 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   # API Gateway origin (FastAPI backend)
+  # invoke_url is "https://{id}.execute-api.{region}.amazonaws.com/" — strip
+  # both the scheme and the trailing slash to get a bare domain name.
   origin {
-    domain_name = replace(aws_apigatewayv2_stage.default.invoke_url, "https://", "")
+    domain_name = trimsuffix(replace(aws_apigatewayv2_stage.default.invoke_url, "https://", ""), "/")
     origin_id   = "apigw-backend"
 
     custom_origin_config {
