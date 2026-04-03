@@ -299,4 +299,8 @@ resource "aws_cloudfront_distribution" "frontend" {
   viewer_certificate {
     cloudfront_default_certificate = true
   }
+
+  # Don't wait for CloudFront to fully propagate during CI — it can take 20-30 mins.
+  # Changes are still applied; they just roll out in the background.
+  wait_for_deployment = false
 }

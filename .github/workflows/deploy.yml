@@ -103,19 +103,17 @@ jobs:
           cache-to: type=gha,mode=max
 
       # Phase B: apply the rest now that the image exists in ECR
+      # Outputs are captured immediately after apply while state is still in memory.
       - name: Terraform apply — full infrastructure
-        working-directory: infrastructure
-        run: terraform apply -auto-approve -input=false
-
-      - name: Read Terraform outputs
         id: tf
         working-directory: infrastructure
         run: |
-          echo "ecr_url=$(terraform output -raw ecr_repository_url)"             >> "$GITHUB_OUTPUT"
-          echo "cf_url=$(terraform output -raw cloudfront_url)"                  >> "$GITHUB_OUTPUT"
-          echo "cf_id=$(terraform output -raw cloudfront_distribution_id)"       >> "$GITHUB_OUTPUT"
-          echo "frontend_bucket=$(terraform output -raw frontend_bucket)"        >> "$GITHUB_OUTPUT"
-          echo "photos_bucket=$(terraform output -raw photos_bucket)"            >> "$GITHUB_OUTPUT"
+          terraform apply -auto-approve -input=false
+          echo "ecr_url=$(terraform output -raw ecr_repository_url)"       >> "$GITHUB_OUTPUT"
+          echo "cf_url=$(terraform output -raw cloudfront_url)"            >> "$GITHUB_OUTPUT"
+          echo "cf_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "frontend_bucket=$(terraform output -raw frontend_bucket)"  >> "$GITHUB_OUTPUT"
+          echo "photos_bucket=$(terraform output -raw photos_bucket)"      >> "$GITHUB_OUTPUT"
 
       # ── 5. Update Lambda function ─────────────────────────────────────────────
       # (skipped on first deploy — Lambda was just created with the image above)
